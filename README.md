@@ -1,1 +1,1 @@
-# enhanced-minimum-cycle-bases
+# Enhanced sampling of minimum cycle bases
