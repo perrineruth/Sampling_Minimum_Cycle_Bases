@@ -5,7 +5,6 @@
 # Current version: Nov. 7, 2025            #
 ############################################
 # To-Dos
-#  - detect and isolate merging bug
 #  - make into a package
 #  - Use sparse formatting for MCB merge matrices.
 
@@ -550,6 +549,8 @@ class cycle_decomposition:
     # bicyclo[2,2,2]octane with extra paths, like spokes on a bike
     # two large cycles with a hexagon joining them
     # a large cycle with a nested bicyclo[2,2,2]octane
+    # degenerate case a (large cycle with a nested bicyclo[2,2,2]octane) where one of the cycles is not relevant
+    # this degenerate case causes 99% of the bugs... grr
     def random_MCB(self,Nrand=None,rep="nodes",merge_MCB=False,Nmerge=100,verbose=False):
         """
         Sample minimum cycle basis uniformly at random.
@@ -620,6 +621,7 @@ class cycle_decomposition:
             # get cycles
             i,j = pair
             C1,C2 = rMCB[i],rMCB[j]
+            if verbose: print(f'''C1,C2 init \nlength {len(C1)}: {C1}, \nlength {len(C2)}: {C2}''')
             flag,Cycs = merge_pair(C1,C2)
             if flag==1: # main case, single replacement cycle for C1
                 rMCB[i] = Cycs
@@ -632,23 +634,22 @@ class cycle_decomposition:
                 assert C1 in pc.sli_classes[row]              # sanity check -> correct sli class
                 # determine which cycle C = C1',C1'' replaces C1
                 for C in Cycs:
-                    # find sli class containing C (note transpose of R makes sli classes cols)
                     for col in range(pc.matrix.ncols):
-                        if C in pc.sli_classes[col]: break # stops at correct value of col
-                    # condition for swap: C1 in decomposition of C
-                    # use block matrix which gives the decomposition of sli classes up to shorter cycles
-                    if row in pc.matrix[:,col]:
-                        pc.sli_classes[row],pc.sli_classes[col] = pc.sli_classes[col],pc.sli_classes[row]
-                        # update MCB cycle
-                        rMCB[i] = C
-                        C1 = C
-                        # update matrix
-                        update_vec = pc.matrix[:,col] + [row] # the cycles used to exchange C1 for C2
-                        for col2 in range(pc.dim_polyhedra):
-                            col2 += pc.rank
-                            if col2!=col and pc.matrix[row,col2]: 
-                                pc.matrix[:,col2] += update_vec
-                        break # already done, don't check second cycle
+                        # use if statement to (1) find which column sli class (column because block matrices are transposed) contains
+                        #                     (2) and verify C1 is in the expansion of C using the block matrix
+                        if C in pc.sli_classes[col] and row in pc.matrix[:,col]:
+                            pc.sli_classes[row],pc.sli_classes[col] = pc.sli_classes[col],pc.sli_classes[row]
+                            # update MCB cycle
+                            rMCB[i] = C
+                            C1 = C
+                            # update matrix
+                            update_vec = pc.matrix[:,col] + [row] # the cycles used to exchange C1 for C2
+                            for col2 in range(pc.dim_polyhedra):
+                                col2 += pc.rank
+                                if col2!=col and pc.matrix[row,col2]: 
+                                    pc.matrix[:,col2] += update_vec
+                            break # already done, don't check second cycle
+            if verbose: print(f'''Adjusted C1: \nlength {len(C1)}: {C1}''')
             
             # reset pairs and matrices for C1 to recompute
             badPairs = [aux for aux in badPairs if i not in aux] # remove other bad pairs with C1
@@ -663,7 +664,7 @@ class cycle_decomposition:
                     Indices[[i,j],[j,i]] = C1.index(P[0]),C2.index(P[0])
                     if len(P)>1 and ((C2.index(P[1])-C2.index(P[0])) % len(C2)) != 1:
                         Weights[j,i] *= -1 # path moves counter-clockwise through C1
-                    assert (len(P)-1)<=(min(len(C1),len(C2))//2), 'invalid path length'
+                    assert (len(P)-1)<=(min(len(C1),len(C2))//2), f'{C1} {C2} invalid path length'
                 elif len(paths)>1:
                     badPairs.append([i,j])
         if verbose: print(merge_step,'actual merge steps')
