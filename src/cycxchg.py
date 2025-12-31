@@ -2,7 +2,7 @@
 # Cycle Exchange                           #
 ############################################
 # Author: Perrin Ruth                      #
-# Current version: Nov. 7, 2025            #
+# Current version: Dec. 4, 2025            #
 ############################################
 # To-Dos
 #  - make into a package
@@ -11,11 +11,11 @@
 # necessary packages
 import numpy as np 
 import networkx as nx
-# included package, sparse binary matrices in list-of-lists format (inner lists are columns)
-import sparseb as spb
-# for optimization
+# custom codes for sparse matrices on the GF(2) field
+import sparseb as spb     
+# base packages useful for optimization
 from time import time
-from collections import deque, defaultdict
+from collections import defaultdict
 
 
 
@@ -562,13 +562,8 @@ class cycle_decomposition:
          - Nmerge:    maximum number of steps to merge the MCB as a safety mechanism. 
 
         Outputs:
-         - rMCB: random MCB as a list of cycles
-         - Weights (if Nmerge=True): matrix of intersection lengths (number of nodes) between cycles i and j
-                                     signed integer (+) if the path takes forward orientation / increasing index
-                                     in cycle i (-) for reverse orentiation
-         - Indices (if Nmerge=True): matrix of starting index of the intersection
-        
-        This Weights, Indices format is lossless. To 
+         - rMCB (merge_MCB=False): random MCB as a list of cycles
+         - Dual (merge_MCB=True):  dual graph representation of the random minimum cycle basis
         """
         # make Nrand into a function regardless
         if not callable(Nrand): Nrandf = lambda _: Nrand
@@ -584,10 +579,9 @@ class cycle_decomposition:
 
         ##############################################
         # 2. compute and merge intersections 
-        # TO-DO: use sparse matrices to save memory in large systems.
-        Weights = np.zeros((self.nu,self.nu))
-        Indices = Weights.copy()
-        # build initial overlap
+        DualGraph = nx.Graph()
+        DualGraph.add_nodes_from([(i,{'nodes':C,'length':len(C)}) for i,C in enumerate(rMCB)])
+        # build initial dual graph from appropriate edges
         badPairs = [] # pairs of cycles (as indices) that need to be merged
         numBad   = 0
         for i,C1 in enumerate(rMCB):
@@ -596,17 +590,23 @@ class cycle_decomposition:
                 paths = pair_intersect(C1,C2)
                 if len(paths)==1:
                     P = paths[0]
-                    Weights[[i,j],[j,i]] = len(P) 
-                    Indices[[i,j],[j,i]] = C1.index(P[0]), C2.index(P[0])
-                    if len(P)>1 and ((C2.index(P[1])-C2.index(P[0])) % len(C2)) != 1:
-                        Weights[j,i] *= -1 # path moves counter-clockwise through C1
+                    # index of first node in each cycle
+                    idx_1,idx_2 = C1.index(P[0]),C2.index(P[0])
+                    # If orientation of P in C2 is in the negative direction, then swap index
+                    if len(P)>1 and ((C2.index(P[1])-C2.index(P[0])) % len(C2)) != 1:   idx_2 = C2.index(P[-1])
+                    # Add path as edges in dual graph. Edge i->j is the perspective of the path from cycle i.
+                    # assumes i<j, which is true by the structure of the for loops
+                    DualGraph.add_edge(i,j, length=len(P)-1, indices=(idx_1,idx_2))
+                    # for debug purposes:
                     assert (len(P)-1)<=(min(len(C1),len(C2))//2), 'invalid path length'
                 elif len(paths)>1:
                     numBad+=1
                     badPairs.append([i,j])
+                    # add edge but skip attributes since they will be modified
+                    DualGraph.add_edge(i,j)
 
 
-        # actually merge the pairs
+        # merge the cycle pairs joined by multiple paths
         merge_step = 0
         if verbose: print(numBad,'initial merge steps')
         while len(badPairs)>0:
@@ -623,10 +623,11 @@ class cycle_decomposition:
             C1,C2 = rMCB[i],rMCB[j]
             if verbose: print(f'''C1,C2 init \nlength {len(C1)}: {C1}, \nlength {len(C2)}: {C2}''')
             flag,Cycs = merge_pair(C1,C2)
+            # merge the cycles
             if flag==1: # main case, single replacement cycle for C1
                 rMCB[i] = Cycs
                 C1 = Cycs
-            else:
+            else:       # degenerate case, two candidates to swap for C1
                 # locate which pi class holds C1
                 idx = np.where(self.pi_ptrs[:,1]<=i)[0][-1] # index for pi class
                 pc  = self.pi_classes[idx]
@@ -650,28 +651,37 @@ class cycle_decomposition:
                                     pc.matrix[:,col2] += update_vec
                             break # already done, don't check second cycle
             if verbose: print(f'''Adjusted C1: \nlength {len(C1)}: {C1}''')
+            # update cycle's nodes in dual graph
+            DualGraph.nodes[i]['nodes'] = C1
             
             # reset pairs and matrices for C1 to recompute
-            badPairs = [aux for aux in badPairs if i not in aux] # remove other bad pairs with C1
-            Weights[i,:],Weights[:,i] = 0,0
-            Indices[i,:],Indices[:,i] = 0,0
-            for j,C2 in enumerate(rMCB):
-                if i==j: continue
+            badPairs = [aux for aux in badPairs if i not in aux] # remove bad pairs with C1 and recompute
+            # new C1 is in the union of the old C1 and C2. Check the neighbors of the previous cycles to compute the new neighbors
+            for k in set(DualGraph[i]).union(DualGraph[j]):
+                if i==k: continue
+                C2 = rMCB[k]
                 paths = pair_intersect(C1,C2)
-                if len(paths) == 1:
+                # clear edge to reset, avoids errors when trying to reintroduce the edge
+                if k in DualGraph[i]: DualGraph.remove_edge(i,k)
+                if len(paths) == 1: # valid intersection
                     P = paths[0]
-                    Weights[[i,j],[j,i]] = len(P)
-                    Indices[[i,j],[j,i]] = C1.index(P[0]),C2.index(P[0])
-                    if len(P)>1 and ((C2.index(P[1])-C2.index(P[0])) % len(C2)) != 1:
-                        Weights[j,i] *= -1 # path moves counter-clockwise through C1
+                    # add connection like above
+                    idx_1,idx_2 = C1.index(P[0]),C2.index(P[0])
+                    if len(P)>1 and ((C2.index(P[1])-C2.index(P[0])) % len(C2)) != 1:   idx_2 = C2.index(P[-1])
+                    # indices and edge has an ordering corresponding to i<k
+                    if i<k:     DualGraph.add_edge(i,k, length=len(P)-1, indices=(idx_1,idx_2))
+                    else:       DualGraph.add_edge(k,i, length=len(P)-1, indices=(idx_2,idx_1))
+                    # check valid path length for debugging
                     assert (len(P)-1)<=(min(len(C1),len(C2))//2), f'{C1} {C2} invalid path length'
-                elif len(paths)>1:
-                    badPairs.append([i,j])
+                elif len(paths)>1: # invalid intersection
+                    badPairs.append([i,k])
+                    if k not in DualGraph[i]: DualGraph.add_edge(i,k) # cycles will change, skip edge attributes
         if verbose: print(merge_step,'actual merge steps')
             
         if rep!='nodes': 
-            raise NotImplementedError("only 'nodes' representation implemented for random MCBs with Nmerge=True")
-        return rMCB, Weights, Indices
+            print("Warning: only 'nodes' representation is valid when mergeMCB is set True. The nodes representation of cycle i" \
+            "can be accessed from the output dual graph using DualGraph[i]['nodes']")
+        return DualGraph
 
     def num_MCB(self):
         """
