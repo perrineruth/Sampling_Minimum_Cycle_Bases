@@ -235,7 +235,7 @@ class cycle_decomposition:
         # pointer for the start of the block in R_Mat for each pi class
         # as pairs for the row and column in R_Mat
         pi_ptrs = np.vstack(( np.cumsum([0]+[pc[1] for pc in pi_classes]),
-                              np.cumsum([0]+[len(pc[0]) for pc in pi_classes]) ), dtype=int).T
+                              np.cumsum([0]+[len(pc[0]) for pc in pi_classes]) )).astype(int).T
         # sort R_Mat so that pi classes form consecutive columns
         colOrder = sum([pc[0] for pc in pi_classes],start=[])
         R_Mat = R_Mat[:,colOrder]
@@ -347,6 +347,10 @@ class cycle_decomposition:
         def edges(self):
             """Union of edges in sli class"""
             return set().union(*[Fam.edges() for Fam in self.families])
+        
+        def all_cycles(self,rep='nodes'):
+            """All cycles belonging to sli class"""
+            return sum([Fam.all_cycles(rep=rep) for Fam in self.families],start=[])
 
         def contains(self,C,rep='nodes'):
             """Returns True if cycle C belongs to the sli class."""
@@ -450,6 +454,10 @@ class cycle_decomposition:
             """Union of edges in polyhedron-interchangeability class"""
             return set().union(*[sc.edges() for sc in self.sli_classes])
 
+        def all_cycles(self,rep='nodes'):
+            """all cycles belonging to polyhedron-iterchangeability class"""
+            return sum([sc.all_cycles(rep=rep) for sc in self.sli_classes],start=[])
+
         def contains(self,C,rep='nodes'):
             """Returns True if cycle C belongs to the polyhedron-interchangeability class."""
             return bool(sum([sc.contains(C,rep=rep) for sc in self.sli_classes]))
@@ -530,11 +538,6 @@ class cycle_decomposition:
         """Number of polyhedron-interchangeability classes"""
         return len(self.pi_classes)
 
-
-    @property
-    def num_relevant_cycles(self):
-        """Number of relevant cycles."""
-        return sum([pc.num_cycles for pc in self.pi_classes])
 
     ######### methods: mostly for sampling minimium cycle bases #########
     def get_MCB(self, rep="nodes"):
@@ -696,9 +699,28 @@ class cycle_decomposition:
         # solution is given by the product of the number of ways cycles can be sampled from each pi class
         return np.prod([pc.num_samples() for pc in self.pi_classes],dtype=float)
 
+
+    @property
+    def num_relevant_cycles(self):
+        """Number of relevant cycles."""
+        return sum([pc.num_cycles for pc in self.pi_classes])
+
+    def relevant_cycles(self,rep='nodes'):
+        """
+        Return list of relevant cycles.
+        Warning: this can take exponential time for general graphs.
+        """
+        return sum([pc.all_cycles(rep=rep) for pc in self.pi_classes],start=[])
+
+    @property
+    def num_essential_cycles(self):
+        # enumerate essential cycles
+        return sum([pc.num_cycles==1 for pc in self.pi_classes])
+
     def essential_cycles(self):
         # list essential cycles
-        raise NotImplementedError("")
+        return [pc.arbitrary_sample()[0] for pc in self.pi_classes if pc.num_cycles==1]
+
 
     def draw_Mat(self,scale=None):
         """Plot the underlying R matrix relating the pi and sli classes"""
@@ -992,6 +1014,35 @@ class RelCyc_Family:
                     searched.add(v)
                     queue.append(v)
         return {(self.node_labels[u],self.node_labels[v]) for u,v in edge_set}
+
+    def all_cycles(self,rep='nodes'):
+        """
+        List of cycles belonging to the cycle family.
+        Warning: runtime is exponential in the worst case.
+        """
+        if self.parity == 0:
+            u1,v1 = self.e1
+            left_paths,right_paths = [[u1]],[[v1]]
+        else:
+            x = self.x
+            left_paths = [[x,u] for u in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][u]==1]
+            # skip x for right paths, only count node once in each cycle
+            right_paths = [[v] for v in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][v]==2]
+        # build out paths one node at a time
+        for _ in range(self.length//2 - 1):
+            left_paths = [path + [u] for path in left_paths for u in self.edge_DAG['parents'][path[-1]]]
+            # travel right paths in reverse direction
+            right_paths = [[u]+path for path in right_paths for u in self.edge_DAG['parents'][path[0]]]
+        # build out cycles as path pairs
+        cycles = [l_path+r_path for l_path in left_paths for r_path in right_paths]
+        # use node labels
+        cycles = [[self.node_labels[u] for u in C] for C in cycles]
+        # only one representation currently allowed
+        if rep == 'nodes':
+            return cycles
+        elif rep == 'edges':
+            return [{(C[-i-1],C[-i]) for i in range(len(C))} for C in cycles]
+        else: raise NotImplementedError
 
     # test cases (1) cube and (2) bracelet w/ 4 diamonds - try reversing and shifting lists too
     def contains(self,C,rep='nodes'):
