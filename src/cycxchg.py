@@ -97,6 +97,8 @@ class cycle_decomposition:
     """
     def __init__(self, G, verbose=None):
         ######################################## Preliminary items ########################################
+        # remove non-bicomponent edges for acceleration
+        G = nx.from_edgelist(set().union(*[BCC for BCC in nx.biconnected_component_edges(G) if len(BCC)>2]))
         # Set node labels to integers; allows lists which are faster than dictionaries indexing.
         node_labels = list(G)
         try: 
