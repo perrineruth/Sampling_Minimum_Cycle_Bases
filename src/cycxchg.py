@@ -2,20 +2,20 @@
 # Cycle Exchange                           #
 ############################################
 # Author: Perrin Ruth                      #
-# Current version: Dec. 4, 2025            #
+# Current version: Mar. 30, 2026           #
 ############################################
-# To-Dos
-#  - make into a package
-#  - Use sparse formatting for MCB merge matrices.
 
 # necessary packages
 import numpy as np 
 import networkx as nx
-# custom codes for sparse matrices on the GF(2) field
-import sparseb as spb     
+# custom codes - not intended to be used by the end user
+import sparseb as spb           # sparse matrix operations on the GF(2) field
+import cycxtract as extract     # extraction of the relevant cycles
 # base packages useful for optimization
 from time import time
 from collections import defaultdict
+# other
+import warnings
 
 
 
@@ -95,7 +95,8 @@ class cycle_decomposition:
     as well as the description of the related methods and 
     objects for more information.
     """
-    def __init__(self, G, verbose=None):
+    def __init__(self, G, verbose=False, method='full', **kwargs):
+        # pass additional arguments to matrix constructor for now
         ######################################## Preliminary items ########################################
         # remove non-bicomponent edges for acceleration
         G = nx.from_edgelist(set().union(*[BCC for BCC in nx.biconnected_component_edges(G) if len(BCC)>2]))
@@ -119,30 +120,40 @@ class cycle_decomposition:
         # Give control of construction of the matrix R to an outside function smaller class, 
         # to keep code in the cycle_decomposition initializer high level.
         # Node labels are given to the cycle families which are the lowest level objects used to construct cycles.
-        kwargs = {'node_labels':node_labels,'labels2node':labels2node} 
-        RelCycMat = Relevant_Cycle_Matrix_Constructor(G, FCB, nu, **kwargs)
+        kwargs = {'node_labels':node_labels,'labels2node':labels2node, **kwargs} 
+        RelCycMat = extract.Relevant_Cycle_Matrix_Constructor(G, FCB, nu, method=method, **kwargs)
         
 
         ### 2. compute the minimum cycle basis (MCB) using witness vectors, 
         # see Kavitha et al. (2009)
         Wit_Mat = spb.speye(nu)                # initial set of witness vectors Si, standard unit vectors grouped into identity
-        MCB = [[] for i in range(nu)]
+        Wit_MatT = spb.speye(nu)               # transpose, because matrix-vector products are faster than vector-matrix products
+        MCB = [0 for i in range(nu)]           # 0 is a placeholder here
         MCB_idxs = np.zeros(nu, dtype=int)     # row index of MCB cycles in RelCycMat
         for i in range(nu):
             # get first row with product R0 @ S_i = 1
             Cyc,idx = RelCycMat.get_dot(Wit_Mat[:,i])
-            MCB[i] = sorted(Cyc) # as an FCB vector
+            MCB[i]  = spb.sparse_GF2_vec(sorted(Cyc),len=nu) # as a sparse FCB vector
             MCB_idxs[i] = idx
             # update future witnesses to satisfy orthogonality condition (<Si,Bj>=0 for i>j)
-            dot_vec = MCB[i] @ Wit_Mat[:,(i+1):]
-            for j,val in enumerate(dot_vec):
-                if val: 
-                    # since witness i already dots 1, this will make the new witness have dot 1+1=0
-                    Wit_Mat[:,(i+1)+j] += Wit_Mat[:,i] 
-        
+            dot_vec = Wit_MatT @ MCB[i]
+            for j in dot_vec:
+                if j>i:
+                    Wit_Mat[:,j] += Wit_Mat[:,i]
+                    for k in Wit_Mat[:,i]: Wit_MatT[j,k]+=1
+
         # Now we can retrieve the matrix and relevant cycle families, since no new families (with larger cycles) need to be generated
         # For large bicomponents this can be roughly 2x faster than constructing the full set of candidate Vismara families
         R_Mat, Rel_Cyc_Fams = RelCycMat.yield_matrix()
+        # remove families larger than the maximum cycle length 
+        if method == 'full' and nu>0:
+            max_L = max([Rel_Cyc_Fams[MCB_idxs[i]].length for i in range(nu)])
+            idx = 0
+            for Fam in Rel_Cyc_Fams:
+                if Fam.length<=max_L:   idx+=1
+                else:                   break
+            Rel_Cyc_Fams = Rel_Cyc_Fams[:idx]
+            R_Mat = R_Mat[:idx,:]
         
         if verbose: 
             # This first computation is the biggest (mostly computing the Vismara families)
@@ -156,10 +167,11 @@ class cycle_decomposition:
             # if cycle has last MCB basis cycle in its representation then its dot with last witness=1.
             # use this to get the following inversion. Section 4.3
             # update earlier witness if their dot product is affected by adding back the later witness.
-            dot_vec = MCB[nu-k-1] @ Wit_Mat[:,:(nu-k-1)] 
-            for j,val in enumerate(dot_vec):
-                if val:
+            dot_vec = Wit_MatT @ MCB[nu-k-1]
+            for j in dot_vec:
+                if j < nu-k-1:
                     Wit_Mat[:,j] += Wit_Mat[:,nu-k-1]
+                    for l in Wit_Mat[:,nu-k-1]: Wit_MatT[j,l]+=1
         # sort MCB and Witnesses to be in increasing length
         MCB_order = sorted(range(nu), key=lambda i: Rel_Cyc_Fams[MCB_idxs[i]].length)
         MCB_idxs  = [MCB_idxs[idx] for idx in MCB_order]
@@ -334,6 +346,8 @@ class cycle_decomposition:
             
         def random_cycle(self,rep='nodes'):
             """Sample cycle from sli class uniformly at random."""
+            if len(self.families)==1:
+                return self.families[0].random_cycle(rep=rep)
             weights = np.array([Fam.num_cycles for Fam in self.families])
             idx = np.random.choice(np.arange(len(self.families)), p=weights/sum(weights))
             return self.families[idx].random_cycle(rep=rep)
@@ -551,18 +565,19 @@ class cycle_decomposition:
         return [self.sli_classes[self.R_Mat[i].nonzero[0]].arbitrary_cycle(rep=rep) for i in range(self.nu)]
 
     # good tests for random MCB:
-    # bicyclo[2,2,2]octane with extra paths, like spokes on a bike
-    # two large cycles with a hexagon joining them
-    # a large cycle with a nested bicyclo[2,2,2]octane
-    # degenerate case a (large cycle with a nested bicyclo[2,2,2]octane) where one of the cycles is not relevant
+    # . bicyclo[2,2,2]octane with extra paths, like spokes on a bike
+    # . two large cycles with a hexagon joining them
+    # . a large cycle with a nested bicyclo[2,2,2]octane
+    # . degenerate case a (large cycle with a nested bicyclo[2,2,2]octane) where one of the cycles is not relevant
     # this degenerate case causes 99% of the bugs... grr
-    def random_MCB(self,Nrand=None,rep="nodes",merge_MCB=False,Nmerge=100,verbose=False):
+    def random_MCB(self,Nrand=None,rep="nodes",rep_MCB='cycles',merge_MCB=False,Nmerge=100,verbose=False,**kwargs):
         """
         Sample minimum cycle basis uniformly at random.
         Inputs:
          - Nrand:     number of randomization steps for polyhedron-interchangeability classes, either 
                       an integer or a function on polyhedron-interchangeability classes to integers.
          - rep:       representation of MCB cycles.
+         - rep_MCB:   representation of MCB (list of 'cycles' or dual 'graph').
          - merge_MCB: boolean if pairs of MCB cycles should be modified to intersect on paths.
          - Nmerge:    maximum number of steps to merge the MCB as a safety mechanism. 
 
@@ -578,37 +593,20 @@ class cycle_decomposition:
         # Recursively call on polyhedron-interchangeability classes for cycles, change representation last
         if not merge_MCB:
             # rely on cycle families for rep if no merging is required
-            return sum([pc.random_sample(N=Nrandf(pc),rep=rep) for pc in self.pi_classes],start=[])
+            if rep_MCB=='cycles':
+                return sum([pc.random_sample(N=Nrandf(pc),rep=rep) for pc in self.pi_classes],start=[])
+            elif rep_MCB=='graph': 
+                raise NotImplementedError("Dual graph not implemented when merge_MCB=False")
+            else:
+                raise ValueError('rep_MCB must be set to either "cycles" for a list of cycles or '\
+                                 +f'"graph" for a dual graph not "{rep_MCB}"')
         # use node representation if we need to merge cycles
         rMCB = sum([pc.random_sample(N=Nrandf(pc),rep='nodes') for pc in self.pi_classes],start=[])
 
         ##############################################
         # 2. compute and merge intersections 
-        DualGraph = nx.Graph()
-        DualGraph.add_nodes_from([(i,{'nodes':C,'length':len(C)}) for i,C in enumerate(rMCB)])
-        # build initial dual graph from appropriate edges
-        badPairs = [] # pairs of cycles (as indices) that need to be merged
-        numBad   = 0
-        for i,C1 in enumerate(rMCB):
-            for aux,C2 in enumerate(rMCB[i+1:]):
-                j = aux+i+1 # index of the second cycle
-                paths = pair_intersect(C1,C2)
-                if len(paths)==1:
-                    P = paths[0]
-                    # index of first node in each cycle
-                    idx_1,idx_2 = C1.index(P[0]),C2.index(P[0])
-                    # If orientation of P in C2 is in the negative direction, then swap index
-                    if len(P)>1 and ((C2.index(P[1])-C2.index(P[0])) % len(C2)) != 1:   idx_2 = C2.index(P[-1])
-                    # Add path as edges in dual graph. Edge i->j is the perspective of the path from cycle i.
-                    # assumes i<j, which is true by the structure of the for loops
-                    DualGraph.add_edge(i,j, length=len(P)-1, indices=(idx_1,idx_2))
-                    # for debug purposes:
-                    assert (len(P)-1)<=(min(len(C1),len(C2))//2), 'invalid path length'
-                elif len(paths)>1:
-                    numBad+=1
-                    badPairs.append([i,j])
-                    # add edge but skip attributes since they will be modified
-                    DualGraph.add_edge(i,j)
+        DualGraph,badPairs = build_dual(rMCB,**kwargs)
+        numBad=len(badPairs)
 
 
         # merge the cycle pairs joined by multiple paths
@@ -657,7 +655,7 @@ class cycle_decomposition:
                             break # already done, don't check second cycle
             if verbose: print(f'''Adjusted C1: \nlength {len(C1)}: {C1}''')
             # update cycle's nodes in dual graph
-            DualGraph.nodes[i]['nodes'] = C1
+            if 'nodes' in DualGraph.nodes[i]: DualGraph.nodes[i]['nodes'] = C1
             
             # reset pairs and matrices for C1 to recompute
             badPairs = [aux for aux in badPairs if i not in aux] # remove bad pairs with C1 and recompute
@@ -683,10 +681,13 @@ class cycle_decomposition:
                     if k not in DualGraph[i]: DualGraph.add_edge(i,k) # cycles will change, skip edge attributes
         if verbose: print(merge_step,'actual merge steps')
             
-        if rep!='nodes': 
-            print("Warning: only 'nodes' representation is valid when mergeMCB is set True. The nodes representation of cycle i" \
-            "can be accessed from the output dual graph using DualGraph[i]['nodes']")
-        return DualGraph
+        if rep_MCB=='cycles':
+            if rep!='nodes': 
+                warnings.warn("only 'nodes' representation is valid when mergeMCB is set True.")
+            return rMCB
+        elif rep_MCB=='graph':
+            return DualGraph
+        else: raise ValueError(f'rep_MCB must be set to either "cycles" for a list of cycles or "graph" for a dual graph not "{rep_MCB}"')
 
     def num_MCB(self):
         """
@@ -694,13 +695,12 @@ class cycle_decomposition:
         
         WARNING: This algorithm can take exponential time in the presence of
         large polyhedron-interchangeability classes.
-        WARNING: The number of MCBs grows exponentially with the number of 
-        polyhedra. Hence, the number of MCBs is computed using integers, which 
-        may lead to rounding errors.
+        WARNING: The number of MCBs is computed using floats due to potential
+        exponential growth. This may cause inexact results due to floating
+        point precision errors.
         """
         # solution is given by the product of the number of ways cycles can be sampled from each pi class
         return np.prod([pc.num_samples() for pc in self.pi_classes],dtype=float)
-
 
     @property
     def num_relevant_cycles(self):
@@ -723,7 +723,6 @@ class cycle_decomposition:
         # list essential cycles
         return [pc.arbitrary_sample()[0] for pc in self.pi_classes if pc.num_cycles==1]
 
-
     def draw_Mat(self,scale=None):
         """Plot the underlying R matrix relating the pi and sli classes"""
         if scale is None:   self.R_Mat.plot()
@@ -732,435 +731,92 @@ class cycle_decomposition:
 
 
 
-#################################################
-# 2'. Relevant Cycle Matrix
-#      Auxilliary function for matrix 
-#      representation of sli/pi classes
-#################################################
-class Relevant_Cycle_Matrix_Constructor:
-    def __init__(self, G, FCB, nu, **kwargs):
-        # graph and number of independent cycles
-        NeighborLists = [list(G[u]) for u in range(len(G))] # list of lists representation, faster iteration
-        self.nu  = nu 
-        self.FCB = FCB # fundamental cycle basis
-        # initialize iterators for computing Vismara families
-        self._edge_iterators = [_Edge_Families(NeighborLists, idx, FCB, **kwargs) for idx in range(self.nu)]
-        # initialize everything else to be empty, generate more as needed
-        self.Rel_Cyc_Fams = []
-        self.R_Mat = spb.zeros(0,self.nu)     # 0 rows without a family
-        self.Lmax = 2                                # no cycles length 2, next round is length 3 and 4 by counting Lmax+2
-        self.buffer = [None for i in range(self.nu)] # buffer for later when generating cycles
-    
-    def get_dot(self, S):
-        # Get the index of the first Vismara family to have dot product 1 with the input witness
-        Cur_Mat = self.R_Mat
-        offset = 0
-        while (Cyc_idx:=next(Cur_Mat.right_vec_dot_iter(S), False)) is False: # the second argument in next is a default if the iterator empties itself
-            # if fails then we need to compute more Vismara families
-            # The following extends the R_Mat and outputs the block of larger cycles added so we don't need to search smaller ones again
-            offset+=Cur_Mat.nrows
-            Cur_Mat = self.extend_Mat()
-        # The ':=' operator assigns the index of the first family with dot product 1 to Cyc_idx, return this
-        Cyc_idx+=offset
-        return self.Rel_Cyc_Fams[Cyc_idx].arbitrary_cycle(), Cyc_idx
-        
-    def extend_Mat(self):
-        # add a buffer
-        self.Lmax += 2  # introduce a new round of odd and even cycles
-        newOddCycs  = [] # length Lmax-1 
-        newEvenCycs = [] # length Lmax
-        
-        # pass through Vismara families at each edge
-        for idx,Fam in enumerate(self.buffer):
-            # start with the cycle in the buffer
-            if Fam is not None:
-                if Fam.length == self.Lmax-1:
-                    newOddCycs.append(Fam)
-                elif Fam.length == self.Lmax:
-                    newEvenCycs.append(Fam)
-                else: 
-                    # cycle is already larger than Lmax, we can look at the next starting edge, keep the same cycle in the buffer
-                    continue
-                    
-            # iterate through new Vismara families until we reach a cycle larger than Lmax or run out of families
-            while (Fam:=next(self._edge_iterators[idx],None)) is not None and Fam.length<=self.Lmax:
-                if Fam.length == self.Lmax-1:
-                    newOddCycs.append(Fam)
-                elif Fam.length == self.Lmax:
-                    newEvenCycs.append(Fam)
-                else: raise ValueError('Invalid cycle length') # it should not be possible to get here
-            
-            # update buffer
-            self.buffer[idx] = Fam # either a larger cycle or None if out of families
-            
-        # update Relevant Cycle Families, sorted by length
-        newFams = newOddCycs+newEvenCycs # odd cycles shorter than even cycles
-        self.Rel_Cyc_Fams += newFams     # previous cycles smaller than current cycles
-        # create new matrix for cycles of current length
-        NewCols = [[] for i in range(self.nu)]
-        for row,Fam in enumerate(newFams):
-            for edge in Fam.arbitrary_cycle(rep='FCB'): # edge from FCB representation
-                NewCols[edge].append(row)
-        New_Mat = spb.sparse_GF2_mat(NewCols,nrows=len(newFams),ncols=self.nu)
-        # append to R matrix
-        self.R_Mat = spb.vstack2(self.R_Mat,New_Mat)
-        # output new matrix
-        return New_Mat
-        
-    def yield_matrix(self):
-        return self.R_Mat, self.Rel_Cyc_Fams
-
-# Helper function for constructing relevant cycle families
-# - Optimizing is important here: this is currently the highest cost
-def _Edge_Families(G, e_idx, FCB, **kwargs):
-    N = len(G) # number of nodes, works for list of lists and networkx
-    u,v = FCB.edges[e_idx]
-    # list of lists representation of directed-acyclic graph
-    # with shortest paths to (u,v)
-    parents = [[] for _ in range(N)] 
-    # node ancestor / closest node between u and v: 
-    #    1 = u,  2 = v,  3 = both
-    #    0 default for unobserved,
-    ancestor = [0]*N # appears to run faster with lists than arrays
-    distance = [0]*N # minimum distance to u or v
-    numPaths = [0]*N # number of (valid) shortest paths from to u or v
-    # good to wrap these into a dictionary - Directed acyclic graph with node properties
-    edge_DAG = {'parents': parents, 'ancestor': ancestor, 'distance': distance, 'numPaths': numPaths} 
-    # initialize root nodes
-    ancestor[u],ancestor[v] = 1,2
-    distance[u],distance[v] = 0,0
-    numPaths[u],numPaths[v] = 1,1
-
-    isValid = [True]*N             # invalid if following a node with both ancestors...
-    queue = [u,v]                  
-    for p in queue: 
-        # if p is at the tip of an odd relevant cycle family
-        if ancestor[p] == 3 and isValid[p]:
-            # look at parents for num. path pairs, use DAG to backtrack
-            num_cycles = sum([numPaths[x] for x in parents[p] if ancestor[x]==1]) * \
-                            sum([numPaths[x] for x in parents[p] if ancestor[x]==2]) # product of path counts to u and v
-            # possible that there are none, this is a degenerate case and should be skipped
-            if num_cycles > 0: 
-                # cycles are 2 shortest paths to u and v and (u,v)
-                length = 2*distance[p] + 1
-                yield RelCyc_Family((u,v), length, num_cycles, x=p, edge_DAG=edge_DAG, FCB=FCB, **kwargs)
-                                                        
-        # look at neighbors
-        for q in G[p]:
-            ###### case 1: v undiscovered #######
-            if ancestor[q]==0:
-                # inherit distance and ancestor properties directly
-                distance[q] = distance[p]+1
-                ancestor[q] = ancestor[p]
-                queue.append(q)
-                # degenerate - if p has ancestor u & v then q is invalid
-                if ancestor[p]==3:
-                    isValid[q] = False # numpaths already 0,
-                # "there is a valid path to p and (p,q) is valid"
-                elif numPaths[p]>0 and not ((p,q) in FCB.edge2idx and e_idx<FCB.edge2idx[(p,q)]): 
-                    parents[q].append(p)
-                    numPaths[q] = numPaths[p]
-            ###### case 2: v after u ############
-            elif distance[q] > distance[p]:
-                if not isValid[q]: continue
-                # degenerate - if p has ancestor u & v then q is invalid
-                if ancestor[p]==3:
-                    isValid[q] = False
-                    numPaths[q],parents[q] = 0,[]
-                else:
-                    # update ancestor if u adds a new one (or if v is already 3 this is no change)
-                    if ancestor[p]!=ancestor[q]: ancestor[q]=3
-                    # add paths and parent if valid
-                    if numPaths[p]>0 and not ((p,q) in FCB.edge2idx and e_idx<FCB.edge2idx[(p,q)]): 
-                        parents[q].append(p)
-                        numPaths[q]+=numPaths[p]
-            ###### case 3: v same distance ###### 
-            #  add even family if p has ancestor u, and q ancestor v to avoid double counting
-            #  need to remove corner case p=u, q=v, it may make this more efficient to parse this before the loop.
-            elif ancestor[p]==1 and ancestor[q]==2 and p!=u:
-                num_cycles = numPaths[p] * numPaths[q]
-                if num_cycles>0 and ((p,q) not in FCB.edge2idx or e_idx>=FCB.edge2idx[(p,q)]):
-                    # cycle is path p->u & q->v and edges (u,v) & (p,q)
-                    length = 2*distance[p]+2     
-                    yield RelCyc_Family((u,v), length, num_cycles, e1=(p,q), edge_DAG=edge_DAG, FCB=FCB, **kwargs)
-
-# class for representing Vismara's cycle families.
-class RelCyc_Family:
-    """Description"""
-    def __init__(self, e0, length, num_cycles, x=None, e1=None, **kwargs):# edge_DAG=None, FCB=None, node_labels=None):
-        self.e0 = e0                    # base edge
-        self.length = length            # length of cycles
-        self.parity = self.length % 2   # even or odd cycle
-        self.num_cycles = num_cycles    # number of cycles in the family
-        if self.parity == 0: # even cyc., e1 is opposite edge
-            assert (x is None and e1 is not None)
-            self.e1 = e1
-        else:
-            assert (x is not None and e1 is None)
-            self.x = x
-        # pass additional arguments into class
-        #  edge_DAG -> edges from child to parent
-        #  FCB -> fundamental cycle basis
-        #  node_labels / labels2idx -> convert from node index to label and vice versa
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-    def __repr__(self):
-        if self.parity == 0:
-            return f"RelCyc_Family(e0={(self.node_labels[self.e0[0]],self.node_labels[self.e0[1]])}, e1={(self.node_labels[self.e1[0]],self.node_labels[self.e1[1]])}, length={self.length}, num_cycles={self.num_cycles})"
-        else:
-            return f"RelCyc_Family(e0={(self.node_labels[self.e0[0]],self.node_labels[self.e0[1]])}, x={self.node_labels[self.x]}, length={self.length}, num_cycles={self.num_cycles})"
-
-    def arbitrary_cycle(self, rep='FCB'):
-        """Extract an arbitrary cycle from a cycle family."""
-        # initialize away from the root edge
-        if self.parity == 1:
-            x = self.x
-            u = next(u for u in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][u]==1) # arbitrary parent w/ u0 as ancestor
-            v = next(v for v in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][v]==2)
-            left_nodes = [x,u]
-            right_nodes = [v]
-        else:
-            u,v = self.e1
-            left_nodes,right_nodes = [u],[v]
-        # backtrack cycles to first parent
-        while u not in self.e0:
-            u = self.edge_DAG['parents'][u][0]
-            left_nodes.append(u)
-        while v not in self.e0:
-            v = self.edge_DAG['parents'][v][0]
-            right_nodes.append(v)
-        # merge both paths, move upwards through the right path
-        left_nodes.extend(right_nodes[::-1])
-        nodes = left_nodes
-        # convert to desired format
-        if rep == 'nodes': 
-            return [self.node_labels[u] for u in nodes]
-        edges = {tuple(sorted([nodes[i], nodes[(i+1)%len(nodes)]])) for i in range(len(nodes))}
-        if rep == 'edges':
-            return {(self.node_labels[u],self.node_labels[v]) for u,v in edges}
-        elif rep == 'FCB':
-            return [self.FCB.edge2idx[e] for e in edges if e in self.FCB.edge2idx]
-
-    def random_cycle(self, rep='FCB'):
-        """random_cycle
-        choose a random cycle from Vismara's cycle family uniformly at random.
-        """
-        def weighted_random_node(nodes):
-            # draw random node from selection with probability proportional to number of cycles using node
-            weights = np.array([self.edge_DAG['numPaths'][u] for u in nodes])
-            return np.random.choice(nodes, p=weights/sum(weights))
-        # opposite end of cycle
-        if self.parity == 1:
-            x = self.x
-            u = weighted_random_node([u for u in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][u]==1])
-            v = weighted_random_node([v for v in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][v]==2]) 
-            left_nodes = [x,u]
-            right_nodes = [v]
-        else:
-            u,v = self.e1
-            left_nodes,right_nodes = [u],[v]
-        # backtrack cycles at random
-        while u not in self.e0:
-            u = weighted_random_node(self.edge_DAG['parents'][u])
-            left_nodes.append(u)
-        while v not in self.e0:
-            v = weighted_random_node(self.edge_DAG['parents'][v])
-            right_nodes.append(v)
-        # merge both paths, move upwards through the right path
-        left_nodes.extend(right_nodes[::-1])
-        nodes = left_nodes
-        if rep == 'nodes': 
-            return [self.node_labels[u] for u in nodes]
-        edges = {tuple(sorted([nodes[i], nodes[(i+1)%len(nodes)]])) for i in range(len(nodes))}
-        if rep == 'edges':
-            return {(self.node_labels[u],self.node_labels[v]) for u,v in edges}
-        elif rep == 'FCB':
-            return [self.FCB.edge2idx[e] for e in edges if e in self.FCB.edge2idx]
-                
-    def nodes(self):
-        """
-        Union of nodes belonging to cycles in the cycle family. Output format is a set 
-        where the order of nodes is not important.
-        """
-        # tree-traversal over the DAG backwards to obtain all nodes in relevant family
-        # initial queue -> nodes opposite of e0
-        if self.parity == 1:    queue = [self.x]
-        else:                   queue = list(self.e1) # e1 is a tuple
-        searched = set(queue)
-        # loop through queue nodes once
-        for u in queue:
-            for v in self.edge_DAG['parents'][u]:
-                if v not in searched:
-                    searched.add(v)
-                    queue.append(v)
-        return {self.node_labels[u] for u in searched}
-    
-    def edges(self):
-        """Union of edges belonging to the cycle family"""
-        # tree-traversal over the DAG backwards to obtain all edges in family
-        # edge indexes are sorted to make edges unique as tuples
-        e_sort = lambda pair: (min(pair),max(pair))
-        if self.parity == 1:
-            queue = [self.x]
-            edge_set = set([e_sort(self.e0)])
-        else:
-            queue = list(self.e1) # deque from tuple
-            edge_set = set([e_sort(self.e0),e_sort(self.e1)])
-        searched = set(queue)
-        # loop while more nodes
-        for u in queue:
-            for v in self.edge_DAG['parents'][u]:
-                edge_set.add(e_sort((u,v)))
-                if v not in searched:
-                    searched.add(v)
-                    queue.append(v)
-        return {(self.node_labels[u],self.node_labels[v]) for u,v in edge_set}
-
-    def all_cycles(self,rep='nodes'):
-        """
-        List of cycles belonging to the cycle family.
-        Warning: runtime is exponential in the worst case.
-        """
-        if self.parity == 0:
-            u1,v1 = self.e1
-            left_paths,right_paths = [[u1]],[[v1]]
-        else:
-            x = self.x
-            left_paths = [[x,u] for u in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][u]==1]
-            # skip x for right paths, only count node once in each cycle
-            right_paths = [[v] for v in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][v]==2]
-        # build out paths one node at a time
-        for _ in range(self.length//2 - 1):
-            left_paths = [path + [u] for path in left_paths for u in self.edge_DAG['parents'][path[-1]]]
-            # travel right paths in reverse direction
-            right_paths = [[u]+path for path in right_paths for u in self.edge_DAG['parents'][path[0]]]
-        # build out cycles as path pairs
-        cycles = [l_path+r_path for l_path in left_paths for r_path in right_paths]
-        # use node labels
-        cycles = [[self.node_labels[u] for u in C] for C in cycles]
-        # only one representation currently allowed
-        if rep == 'nodes':
-            return cycles
-        elif rep == 'edges':
-            return [{(C[-i-1],C[-i]) for i in range(len(C))} for C in cycles]
-        else: raise NotImplementedError
-
-    # test cases (1) cube and (2) bracelet w/ 4 diamonds - try reversing and shifting lists too
-    def contains(self,C,rep='nodes'):
-        """Returns True if cycle C belongs to the cycle family."""
-        if rep == 'nodes':
-            # validate length
-            L = self.length
-            if len(C)!=L: return False
-            # convert nodes to integer labels
-            C = [self.labels2node[u] for u in C]
-            u0,v0 = self.e0
-            # locate u0 in C
-            try:                idx = C.index(u0)
-            except ValueError:  return False    # not found
-            C = C[idx:]+C[:idx]             # move u0 to start of list
-            # locate and move v0 to end of list
-            if C[1]==v0:    C[1:] = C[1:][::-1] # reverse orientation
-            elif C[-1]!=v0: return False        # not found in valid location
-            # validate descriptors
-            if self.parity == 0:
-                if self.e1 != tuple(C[L//2-1 : L//2+1]):    return False
-            elif self.x != C[L//2]:                         return False
-            # validate paths
-            for i in range((L-1)//2):
-                # left path
-                if C[i] not in self.edge_DAG['parents'][C[i+1]]:
-                    return False
-                # right path
-                if C[-i-1] not in self.edge_DAG['parents'][C[-i-2]]:
-                    return False
-            # passed test
-            return True
-        else:
-            raise NotImplementedError('Only nodes representation implemented for contains method.')
-
-    def __contains__(self,item):
-        # Wrapper so that the line "C in <Family>" uses the contains function.
-        # Assumes cycle uses list of nodes representation.
-        return self.contains(item)
-    
-
-
 
 #################################################
 # 3. MCB Pair Intersections
 #      Process cycle pairs to obtain intersection
 #      paths and candidate cycles to merge them.
 #################################################
-# good test case
-# C1=[0,1,2,3,4,5],C2=[0,1,6,7,8,5] -> starting point has to be moved to work here
+def build_dual(MCB,keep_nodes=False):
+    DualGraph = nx.Graph()
+    if keep_nodes: 
+        DualGraph.add_nodes_from([(i,{'nodes':C,'length':len(C)}) for i,C in enumerate(MCB)])
+    else:
+        DualGraph.add_nodes_from([(i,{'length':len(C)}) for i,C in enumerate(MCB)])
+    badPairs = [] # pairs of cycles (as indices) that need to be merged
+    # build incidence matrix of nodes in cycles to reduce complexity
+    node2cyc = defaultdict(list)
+    for j,C2 in enumerate(MCB):
+        # use a set to select neighbors (with smaller index) to avoid repeats
+        neighs = set()
+        for u in C2:
+            neighs = neighs.union(node2cyc[u])
+            node2cyc[u].append(j)
+        for i in neighs:
+            C1 = MCB[i]
+            paths = pair_intersect(C1,C2)
+            if len(paths)==1:
+                P = paths[0]
+                # index of first node in each cycle
+                idx_1,idx_2 = C1.index(P[0]),C2.index(P[0])
+                # compute orientation between cycles
+                if len(P)>1 and C2[idx_2-1]==P[1]: # reverse orientation   
+                    orientation = -1
+                else:                                                               
+                    orientation = +1
+                # Add path as edge in dual graph. Edge (i,j) assumes i<j for "indices", which is true by node2cyc loop.
+                DualGraph.add_edge(i,j, length=len(P)-1, indices=(idx_1,idx_2), orientation=orientation)
+                assert (len(P)-1)<=(min(len(C1),len(C2))//2), 'invalid path length'
+            elif len(paths)>1:
+                badPairs.append([i,j])
+                # add edge but skip attributes since they will be modified
+                DualGraph.add_edge(i,j)
+    return DualGraph, badPairs
+
 def pair_intersect(C1,C2):
     """
     pair_intersect
-    Finds the intersections of cycles C1 and C2 which are in list of node representation. All outputs use C1 for
-    finding the length of separation between paths.
+    Finds the intersections of cycles C1 and C2 which are in list of node representation. Assumes the cycles belong
+    to a common minimum cycle basis.
     Output:
      - paths = intersection paths as a list of lists of nodes with the orientation they appear in C1
     """
-    # C1, C2 simple cycles as lists of nodes - format not validated
-    k1,k2  = len(C1),len(C2)
-    
-    # shared nodes, check if there is any intersection
-    # this runs very fast and filters most cycle pairs do not intersect - keep this first! (1s vs 10s)
+    k1 = len(C1)
+    # first, check if there is any intersection
     shared_nodes = set(C1).intersection(C2)
-    if len(shared_nodes)==0: 
+    if not shared_nodes: 
         return []            # empty intersection
-    # Edges belonging to C1 and C2 (note edges are ordered, but that is unimportant)
-    shared_edges = set((C1[i-1],C1[i]) for i in range(k1) if (C1[i-1] in shared_nodes) and (C1[i] in shared_nodes))
-    if len(shared_edges) == k1 == k2: 
-        return [C1.copy()]     # cycles are equal
     
-    # degree of nodes with respect to intersection edges
-    degrees = defaultdict(int) # 0 if unspecified
-    for u,v in shared_edges:
-        degrees[u]+=1
-        degrees[v]+=1
-    # loop through C1 to interpret as a list of paths
-    C1_idx,u = 0,C1[0]
-    # if in the middle of path (deg. 2) or end of path (deg. 1, following edge not present)
-    # then move to start of path (path of length 0 is deg. 0)
-    if degrees[u]==2 or (degrees[u]==1 and (C1[0],C1[1]) not in shared_edges):
-        # backtrack until next 1
-        for C1_idx in range(k1-1,0,-1):
-            u = C1[C1_idx]
-            if degrees[u]<2:
-                break # found start of path
+    # find index of node u in C1 that does not belong to C2, but the previous node does
+    for C1_idx in range(k1):
+        if C1[C1_idx] not in shared_nodes and C1[C1_idx-1] in shared_nodes:
+            break
                 
     # start constructing paths
-    state = 0       # not in path yet
-    paths,dists = [],[]
-    for _ in range(k1):
-        if state == 0: # path not started
-            if degrees[u]>0: # start of path
-                Path = [u]
-                state = 1
-            elif u in shared_nodes: # path with a single node, no edges
-                paths.append([u]) 
-                dists.append(1) # initialize distance as 1 and increment as needed
-            else:
-                if len(dists)>0:
-                    dists[-1]+=1
-        elif state == 1: # in a path already
-            Path.append(u)
-            if degrees[u] == 1: # end of path
+    state = 0
+    paths,dists = [],[1]
+    for u in C1[C1_idx+1:]+C1[:C1_idx]: 
+        if state == 0:  # not in path currently
+            if u in shared_nodes:   # start of path
+                Path,state = [u],1
                 paths.append(Path)
+            else:                   # still separated / between paths
+                dists[-1]+=1
+        else:
+            if u in shared_nodes:   # continuing path
+                Path.append(u)
+            else:                   # end of path
                 state = 0
-                dists.append(1) # initialize distance as 1 and increment as needed
-        C1_idx = (C1_idx+1) % k1
-        u = C1[C1_idx]
+                dists.append(1)
         
     # sort paths so first and last paths are furthest apart
-    dists[-1] = k1 - sum(len(P)-1 for P in paths) - sum(dists[:-1])
-    idx = np.argmax(dists)
-    paths = paths[idx+1:]+paths[:idx+1]
+    idx,d = 0,dists[0] # find argmax manually slightly faster w/o numpy
+    for idx2,d2 in enumerate(dists[1:]):
+        if d2>d: idx,d = idx2+1,d2
+    # dist[i] is distance between path[i-1] and path[i] in terms of number of nodes
+    paths = paths[idx:]+paths[:idx]
     return paths
- 
+
 # Test cases
 # C1 = [0,1,2,3,4,5,6,7,8,9]; C2 = ['a',1,'c',3,4,'f','g','h']
 # vary with C1,C2  C2,C1  C1[::-1],C2  C2,C1[::-1] etc.

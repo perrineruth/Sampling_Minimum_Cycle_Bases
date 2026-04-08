@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "cycxchg"
 description = "Cycle exchange: sampling the minimum cycle bases of a graph"
 readme = "README.md"
-version = "0.0.4"
+version = "0.0.5"
 authors = [
     { name = "Perrin Ruth", email="pruth@umd.edu"},
 ]

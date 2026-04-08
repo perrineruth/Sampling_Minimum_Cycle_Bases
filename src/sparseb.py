@@ -36,7 +36,7 @@ class sparse_GF2_mat:
      - nrows = number of rows.
      - ncols = number of columns, must be equal to len(data)
     """
-    def __init__(self, data, nrows, ncols):
+    def __init__(self, data, nrows, ncols, validate=True):
         # size of matrix m x n =  nrows x ncols
         self.nrows=nrows
         self.ncols=ncols
@@ -51,7 +51,7 @@ class sparse_GF2_mat:
                 if len(col)==nrows: self.columnData[idx] = col
                 else:               raise ValueError(f'invalid vector length {len(col)} for matrix with nrows={nrows}')
             else:                           # list,iterable,etc.
-                self.columnData[idx] = sparse_GF2_vec(col,nrows)
+                self.columnData[idx] = sparse_GF2_vec(col,nrows,validate=validate)
 
     # representation for stdout
     def __repr__(self):
@@ -67,35 +67,34 @@ class sparse_GF2_mat:
     # indexing, not all reasonable indexing is implemented! Just enough to make the code work
     def __getitem__(self,idx):
         match idx:
-             # 2D input: matrix indexing, both cases lead here.
-            case (x_idx,y_idx):
+             # 2D input: matrix indexing
+            case tuple((x_idx,y_idx)):
+                if type(x_idx)==slice and x_idx==slice(None): return(self[y_idx]) # A[:,y_idx]=A[y_]
                 # parse columns first -> rely on numpy for parsing
-                aux = self.columnData[y_idx].copy() # copy array so that we do not change original matrix
+                aux = self.columnData[y_idx]
                 match aux:
                     # indexing gives a matrix
                     case np.ndarray():
-                        if type(x_idx)==slice and x_idx==slice(None): # special case, no row indexing, use a shorthand
-                            return sparse_GF2_mat(aux, nrows=self.nrows, ncols=len(aux))
-                        else: 
-                            # index sparse vector columns with x_idx
-                            for i,col in enumerate(aux):
-                                aux[i] = col[x_idx]
-                            # if type(aux[0])==sparse_GF2_vec: # vector columns
-                            #     return sparse_GF2_mat(aux, nrows=len(aux[0]), ncols=len(aux))
-                            # elif type(aux[0])==int:          # special case single row was accessed return a binary array
-                            #     return aux.astype(int)
-                            if type(x_idx) == int: # special case single row was accessed, return a binary array
-                                return aux.astype(int)
-                            else:
-                                nrows = len(np.arange(self.nrows)[x_idx]) # indexing matches numpy when available
-                                return sparse_GF2_mat(aux, nrows=nrows, ncols=len(aux))
+                        aux = aux.copy() # copy, otherwise extracting from rows overwrites them
+                        # index sparse vector columns with x_idx
+                        for i,col in enumerate(aux):
+                            aux[i] = col[x_idx]
+                        if type(x_idx) == int: # special case single row was accessed, return a binary array
+                            return aux.astype(int)
+                        else:
+                            nrows = len(np.arange(self.nrows)[x_idx]) # indexing matches numpy when available
+                            return sparse_GF2_mat(aux, nrows=nrows, ncols=len(aux))
                     # y_idx is an integer -> return a single column (indexed by x_idx)
                     case sparse_GF2_vec():
                         return aux[x_idx]
             # 1D input: column indexing
-            case _:
-                # shorthand M[idx] = M[:,idx]
-                return self[:,idx]
+            case y_idx:
+                aux = self.columnData[y_idx]
+                match aux:
+                    case np.ndarray():
+                        return sparse_GF2_mat(aux.copy(), nrows=self.nrows, ncols=len(aux))
+                    case sparse_GF2_vec():
+                        return aux
     
     # item assignment, only single entry M[i,j] (type(i)=type(j)=int) or single column assignment M[:,j]
     def __setitem__(self,idx,val):
@@ -148,8 +147,7 @@ class sparse_GF2_mat:
             case sparse_GF2_mat():
                 if self.ncols!=B.nrows:
                     raise ValueError('Number of columns does not equal number of rows in multiplied matrix.')
-                return sparse_GF2_mat([_iter_sum([self.columnData[i] for i in v]) for v in B.columnData], nrows=self.nrows, ncols=B.ncols)
-                return sparse_GF2_mat([sum([self.columnData[i] for i in v],start=sparse_GF2_vec([],self.nrows)) for v in B.columnData], nrows=self.nrows, ncols=B.ncols)
+                return sparse_GF2_mat([iter_sum([self.columnData[i] for i in v]) for v in B.columnData], nrows=self.nrows, ncols=B.ncols, validate=False)
 
     # specialty matrix-vector multiplication A@v output as an iterator
     def right_vec_dot_iter(self,v):
@@ -158,9 +156,9 @@ class sparse_GF2_mat:
         of the product. This is used to speed up computation of a MCB by returning only an optimal cycle with given inner product.
         """
         if isinstance(v,list) or isinstance(v,sparse_GF2_vec):
-            return _iter_sum([self.columnData[i] for i in v])
+            return iter_sum([self.columnData[i] for i in v])
         elif isinstance(v,sparse_GF2_mat) and v.ncols==1 and v.nrows==self.ncols:
-            return _iter_sum([self.columnData[i] for i in v.columnData[0]])
+            return iter_sum([self.columnData[i] for i in v.columnData[0]])
         else:
             raise ValueError("malformed input for matrix vector product")
 
@@ -178,7 +176,7 @@ class sparse_GF2_mat:
         for j,col in enumerate(self.columnData):
             for i in col:
                 rowData[i].append(j)
-        return sparse_GF2_mat(rowData, nrows=self.ncols, ncols=self.nrows)
+        return sparse_GF2_mat(rowData, nrows=self.ncols, ncols=self.nrows, validate=False)
 
     # shorthand
     @property
@@ -223,14 +221,15 @@ class sparse_GF2_vec:
     - L is a sorted integer list whose values are the indexes of the nonzero entries in the vector
     - d is the dimension of the vector.
     """
-    def __init__(self,data,len):
+    def __init__(self,data,len, validate=True):
         self.data = list(data) # data should be in list format, could be initially an iterator or np array
         self.len  = len
         # validate input format
-        for i,val in enumerate(self.data):
-            if not np.issubdtype(type(val),np.integer): raise ValueError('Only integer indexes permitted') # integer or numpy integer...
-            if i>=1 and val<=self.data[i-1]:            raise ValueError('Input list is not sorted (strictly increasing)')
-            if val>=len:                                raise ValueError('indexes can only range from 0,...,d-1 for dimension d')
+        if validate:
+            for i,val in enumerate(self.data):
+                if not np.issubdtype(type(val),np.integer): raise ValueError('Only integer indexes permitted') # integer or numpy integer...
+                if i>=1 and val<=self.data[i-1]:            raise ValueError('Input list is not sorted (strictly increasing)')
+                if val>=len:                                raise ValueError('indexes can only range from 0,...,d-1 for dimension d')
 
     # binary vector addition modulo 2
     def __add__(self,v):
@@ -240,50 +239,28 @@ class sparse_GF2_vec:
             except: raise ValueError(f"Addition not implemented between type sparse_GF2_vec and {type(v)}")
         elif self.len!=v.len: 
             raise ValueError(f"added vectors are not of equal length") # if it is a vector they need to be the same length
-        # create empty vector for output, reduces length of time to check valid format
-        out_vec = sparse_GF2_vec([],self.len)
-        as_iter1,as_iter2 = iter(self),iter(v)
-        # initialize search, try to obtain a single
-        try: x=next(as_iter1) # first element of self
-        except StopIteration: # self is empty, return v
-            out_vec.data = v.data.copy()
-            return out_vec
-        try: y=next(as_iter2)
-        except StopIteration: # v is empty, return self
-            out_vec.data = self.data.copy()
-            return out_vec
-        # iterate through both lists
-        vals = [] # this will be the final data
-        while True:
-            if x<y:
-                # x is the next lowest element
+        as_iter = iter(v)
+        try: x=next(as_iter)    # first element of v
+        except StopIteration:   # v is empty, copy of self
+            return sparse_GF2_vec(self.data.copy(),self.len,validate=False)
+        vals = []
+        for i,y in enumerate(self.data):
+            while x<y:
                 vals.append(x)
-                try: x=next(as_iter1)
+                try: x=next(as_iter)
                 except StopIteration:
-                    vals.append(y)              # y not included in iterator
-                    vals.extend(list(as_iter2)) # add rest of v to list
-                    break                       # leave while loop
+                    vals.extend(self.data[i:])  # add rest of v to list
+                    return sparse_GF2_vec(vals,self.len,validate=False)
             if y<x:
                 vals.append(y)
-                try: y=next(as_iter2)
+            else:    
+                try: x=next(as_iter)
                 except StopIteration:
-                    vals.append(x)
-                    vals.extend(list(as_iter1)) # add rest of self to list
-                    break
-            if y==x:
-                # shared element x and y cancel, step through iteration
-                try: x=next(as_iter1)
-                except StopIteration:
-                    # old y do not include
-                    vals.extend(list(as_iter2)) # add rest of v to list
-                    break                       
-                try: y=next(as_iter2)
-                except StopIteration:
-                    vals.append(x) # new x, DO include
-                    vals.extend(list(as_iter1)) # add rest of self to list
-                    break
-        out_vec.data=vals
-        return out_vec
+                    vals.extend(self.data[i+1:])  # add rest of v to list
+                    return sparse_GF2_vec(vals,self.len,validate=False)
+        vals.append(x)
+        vals.extend(as_iter)
+        return sparse_GF2_vec(vals,self.len,validate=False)
 
     # code to associate @ operator to dot product, refer to __rmatmul__ of matrix type for vector-matrix multiplication
     def __matmul__(self,v):
@@ -336,7 +313,7 @@ class sparse_GF2_vec:
                     data = [(i-start)//step for i in self.data if i>=start and i<stop and ((i-start)%step)==0]
                 else: # 'step<0'
                     data = [(i-start)//step for i in self.data[::-1] if i<=start and i>stop and ((i-start)%step)==0]
-                return sparse_GF2_vec(data,length)
+                return sparse_GF2_vec(data, length, validate=False)
             case np.ndarray():
                 # only binary masks of vector
                 if idx.dtype==bool and np.shape(idx)==(self.len,):
@@ -365,7 +342,7 @@ class sparse_GF2_vec:
         # index of first entry in data >= idx
         idx2 = bisect_left(self.data, idx)
         # set to 1
-        if val:
+        if val%2:
             # not present yet
             if idx2>=len(self.data) or self.data[idx2]!=idx:
                 self.data.insert(idx2,idx) # format is insert(index,element): idx is the value to add and idx2 is where to add it
@@ -399,7 +376,7 @@ class sparse_GF2_vec:
     
     # for print out to stdout
     def __repr__(self):
-        return str(self.data)
+        return f'sparse_GF2_vec({self.data}, len={self.len})'
 
     def copy(self):
         aux = sparse_GF2_vec([],self.len) # empty vector to skip format checking
@@ -408,7 +385,10 @@ class sparse_GF2_vec:
 
 # _______________ Supplementary vector functions _____________________
 # sum of iterable sparse binary vectors return as an iterable rather than a list
-# useful when we only want the first nonzero index and the remaining are unimportant as 
+# useful when we only want the first nonzero index and the remaining values are unimportant 
+def iter_sum(vectors):
+    return _iter_sum([iter(v) for v in vectors])
+
 def _iter_sum(iterables):
     Ni = len(iterables)
     if Ni>2: 
@@ -416,52 +396,29 @@ def _iter_sum(iterables):
     elif Ni==2:
         return _iter_add(iterables[0],iterables[1])
     elif Ni==1:
-        return iter(iterables[0])
+        return iterables[0]
     else: # Ni==0
         return iter()
 
-def _iter_add(L1,L2):
-    # L1, L2 may be lists or sparse GF2 vectors
-    as_iter1,as_iter2 = iter(L1),iter(L2)
-    # get first elements, print if it stops
-    try: x = next(as_iter1)
+def _iter_add(it1,it2):
+    try: x = next(it1)
     except StopIteration:
-        yield from as_iter2 # yield items from iter2 step by step
+        yield from it2
         return
-    try: y = next(as_iter2)
-    except StopIteration:
-        yield x             # x already popped, then yield everything else
-        yield from as_iter1
-        return
-    
-    # loop through and take smaller, cancel if equal
-    while True:
-        # print next element 
-        # case 1: list 1 element first
-        if x<y:
+    for y in it2:
+        while x<y:
             yield x
-            try: x = next(as_iter1)
+            try: x = next(it1)
             except StopIteration:
                 yield y
-                yield from as_iter2
+                yield from it2
                 return
-        # case 2: list 2 element first
-        elif y<x:
-            yield y
-            try: y = next(as_iter2)
+        if y<x: yield y
+        else: 
+            try: x = next(it1)
             except StopIteration:
-                yield x
-                yield from as_iter1
+                yield from it2
                 return
-        # case 3: tie and cancel
-        else:
-            try: x = next(as_iter1)
-            except StopIteration:
-                yield from as_iter2 # don't output y which cancels
-                return
-            try: y = next(as_iter2)
-            except StopIteration:
-                yield x # this x is new
-                yield from as_iter1
-                return
-    
+    yield x
+    yield from it1
+    return
