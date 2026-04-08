@@ -12,7 +12,10 @@ Included in this repository is a package `cycxchg` for computing cycles from a N
 ```
 pip install cycxchg
 ```
-We recommended installing this package in a new Python environment.
+We recommended installing this package in a new Python environment. Optionally, this package can be built with numba to greatly improve performance
+```
+pip install cycxchg[numba]
+```
 
 Alternatively, the `cycxchg` package can be installed locally, so that the files can be modified.
 ```

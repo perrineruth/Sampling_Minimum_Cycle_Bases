@@ -21,6 +21,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
+[project.optional-dependencies]
+numba = [
+    "numba",
+]
 
 [project.urls]
 Homepage = "https://github.com/perrineruth/Sampling_Minimum_Cycle_Bases"
