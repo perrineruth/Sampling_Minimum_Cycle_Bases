@@ -11,7 +11,12 @@ import time
 # optimize with numba where available
 try: 
     from numba import njit
-    from scipy.sparse import csr_matrix
+    class CSR_AdjList: # a CSR sparse format that can be indexed like a list of lists
+        def __init__(self,ind_ptr,indices):
+            self.ind_ptr = ind_ptr
+            self.indices = indices
+        def __getitem__(self,idx):
+            return self.indices[self.ind_ptr[idx]:self.ind_ptr[idx+1]]
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
@@ -29,7 +34,6 @@ class Relevant_Cycle_Matrix_Constructor:
         N = G.number_of_nodes()
         adj_list  = [list(G[u]) for u in range(len(G))]
         self.nu  = nu 
-        self.FCB = FCB
         if nu == 0: # special case no cycles: handle directly
             self.Rel_Cyc_Fams = []
             self.R_Mat = spb.zeros(0,0)
@@ -45,33 +49,29 @@ class Relevant_Cycle_Matrix_Constructor:
                 for idx,(u,v) in enumerate(FCB.edges):
                     Fams, pind_ptr,pindices,ancestor,distance,numPaths = _Edge_Families_Full_numba(N,ind_ptr,indices,FCB_vals,idx,u,v)
                     # convert parents to a format that can be indexed like a list of lists
-                    class CSR_AdjList:
-                        def __init__(self,ind_ptr,indices):
-                            self.ind_ptr = ind_ptr
-                            self.indices = indices
-                        def __getitem__(self,idx):
-                            return self.indices[self.ind_ptr[idx]:self.ind_ptr[idx+1]]
                     edge_DAG_AdjList = CSR_AdjList(pind_ptr,pindices)
                     edge_DAG = {'parents':edge_DAG_AdjList, 'ancestor':ancestor, 'distance':distance, 'numPaths':numPaths}
                     # post-process cycle families
                     for row in Fams:
                         if row[0]==-1: # odd family
-                            p,length,num_cycles = row[1:]
+                            p = row[1]
+                            length,num_cycles = 2*distance[p]+1,numPaths[p]
                             if num_cycles>1:    self.Rel_Cyc_Fams.append(RelCyc_Family((u,v), length, num_cycles, x=p, edge_DAG=edge_DAG, FCB=FCB, **kwargs))
-                            else:               self.Rel_Cyc_Fams.append(Ess_Family((u,v), length, num_cycles, x=p, edge_DAG=edge_DAG, FCB=FCB, **kwargs))
+                            else:               self.Rel_Cyc_Fams.append(Ess_Family((u,v), length, x=p, edge_DAG=edge_DAG, FCB=FCB, **kwargs))
                         else:          # even family
-                            p,q,length,num_cycles = row
+                            p,q = row
+                            length,num_cycles = 2*distance[p]+2,numPaths[p]*numPaths[q]
                             if num_cycles > 1:  self.Rel_Cyc_Fams.append(RelCyc_Family((u,v), length, num_cycles, e1=(p,q), edge_DAG=edge_DAG, FCB=FCB, **kwargs))
-                            else:               self.Rel_Cyc_Fams.append(Ess_Family((u,v), length, num_cycles, e1=(p,q), edge_DAG=edge_DAG, FCB=FCB, **kwargs))
+                            else:               self.Rel_Cyc_Fams.append(Ess_Family((u,v), length, e1=(p,q), edge_DAG=edge_DAG, FCB=FCB, **kwargs))
             else:
                 self.Rel_Cyc_Fams = sum([list(_Edge_Families(G,i,FCB,**kwargs)) for i in range(len(FCB.edges))],start=[])
             # sort by length and extract a matrix of prototypes
             self.Rel_Cyc_Fams = sorted(self.Rel_Cyc_Fams, key=lambda x: x.length)
-            Cols = [[] for i in range(self.nu)]
+            Cols = [[] for _ in range(self.nu)]
             for row,Fam in enumerate(self.Rel_Cyc_Fams):
                 for edge in Fam.arbitrary_cycle(rep='FCB'): # edge from FCB representation
                     Cols[edge].append(row)
-            self.R_Mat = spb.sparse_GF2_mat(Cols,nrows=len(self.Rel_Cyc_Fams),ncols=self.nu)
+            self.R_Mat = spb.sparse_GF2_mat(Cols,nrows=len(self.Rel_Cyc_Fams),ncols=self.nu, validate=False)
         elif method == 'iter': # for when max cycle length << diameter
             # iterators for rel cycle families which can be terminated early 
             self._edge_iterators = [_Edge_Families(adj_list, idx, FCB, **kwargs) for idx in range(nu)]
@@ -143,39 +143,6 @@ class Relevant_Cycle_Matrix_Constructor:
 
 
 
-def aux_test(G,FCB,mode,**kwargs):
-    N = G.number_of_nodes()
-    adj_list = [list(G[u]) for u in G]
-    # CSR graph representation
-    ind_ptr = np.cumsum([0]+[len(aux) for aux in adj_list])
-    indices = np.concatenate(adj_list)
-    # use CSR representation to lookup FCB indexes
-    FCB_vals = [[FCB.edge2idx[(u,v)] if (u,v) in FCB.edge2idx else -1    for v in L]    for u,L in enumerate(adj_list)]
-    FCB_vals = np.concatenate(FCB_vals)
-    if mode == 'python':
-        result = sum([list(_Edge_Families(G,i,FCB,**kwargs)) for i in range(len(FCB.edges))],start=[])
-    elif mode == 'numpy':
-        result = []
-        for idx,(u,v) in enumerate(FCB.edges):
-            result.append(_Edge_Families_Full_numpy(N,ind_ptr,indices,FCB_vals,idx,u,v))
-    elif mode == 'numba':
-        result = []
-        for idx,(u,v) in enumerate(FCB.edges):
-            Fams, pind_ptr,pindices,ancestor,distance,numPaths = _Edge_Families_Full_numba(N,ind_ptr,indices,FCB_vals,idx,u,v)
-            # convert parents to a format that can be indexed like a list of lists
-            edge_DAG_CSR = csr_matrix((np.ones_like(pindices), pindices, pind_ptr)) # data=1, neighbors, pointers to neighbor array
-            class CSR_AdjList:
-                def __init__(self,A):
-                    self.CSR = A
-                def __getitem__(self,idx):
-                    return self.CSR[idx].nonzero()[1]
-            edge_DAG_AdjList = CSR_AdjList(edge_DAG_CSR)
-            edge_DAG = {'parents':edge_DAG_AdjList, 'ancestor':ancestor, 'distance':distance, 'numPaths':numPaths}
-            result.append([u,v,Fams,edge_DAG])
-    else:
-        raise ValueError(f'mode: {mode}')
-    return result
-
 # Helper function for constructing relevant cycle families
 # - Optimizing is important here: this is currently the highest cost
 def _Edge_Families(G, e_idx, FCB, **kwargs):
@@ -189,13 +156,13 @@ def _Edge_Families(G, e_idx, FCB, **kwargs):
     #    0 default for unobserved,
     ancestor = [0]*N # appears to run faster with lists than arrays
     distance = [0]*N # minimum distance to u or v
-    numPaths = [0]*N # number of (valid) shortest paths from to u or v
+    numPaths = [0.0]*N # number of (valid) shortest paths from to u or v, float to handle large V-families
     # good to wrap these into a dictionary - Directed acyclic graph with node properties
     edge_DAG = {'parents': parents, 'ancestor': ancestor, 'distance': distance, 'numPaths': numPaths} 
     # initialize root nodes
-    ancestor[u],ancestor[v] = 1,2
-    distance[u],distance[v] = 0,0
-    numPaths[u],numPaths[v] = 1,1
+    ancestor[u],ancestor[v] = 1  ,2
+    distance[u],distance[v] = 0  ,0
+    numPaths[u],numPaths[v] = 1.0,1.0
 
     isValid = [True]*N             # invalid if following a node with both ancestors...
     queue = [u,v]                  
@@ -212,7 +179,7 @@ def _Edge_Families(G, e_idx, FCB, **kwargs):
                 if num_cycles>1:
                     yield RelCyc_Family((u,v), length, num_cycles, x=p, edge_DAG=edge_DAG, FCB=FCB, **kwargs)
                 else:
-                    yield Ess_Family((u,v), length, num_cycles, x=p, edge_DAG=edge_DAG, FCB=FCB, **kwargs)
+                    yield Ess_Family((u,v), length, x=p, edge_DAG=edge_DAG, FCB=FCB, **kwargs)
                                                         
         # look at neighbors
         for q in G[p]:
@@ -254,7 +221,7 @@ def _Edge_Families(G, e_idx, FCB, **kwargs):
                     if num_cycles > 1:
                         yield RelCyc_Family((u,v), length, num_cycles, e1=(p,q), edge_DAG=edge_DAG, FCB=FCB, **kwargs)
                     else:
-                        yield Ess_Family((u,v), length, num_cycles, e1=(p,q), edge_DAG=edge_DAG, FCB=FCB, **kwargs)
+                        yield Ess_Family((u,v), length, e1=(p,q), edge_DAG=edge_DAG, FCB=FCB, **kwargs)
 
 # numba implementation for significant speed increases
 @njit()
@@ -264,7 +231,7 @@ def _Edge_Families_Full_numba(N,ind_ptr,indices,FCB_vals,e_idx,u,v):
 
     ancestor = np.zeros(N,dtype=np.int64) # node ancestor / closest node between u and v
     distance = np.zeros(N,dtype=np.int64) # minimum distance to u or v
-    numPaths = np.zeros(N,dtype=np.int64) # number of (valid) shortest paths from to u or v
+    numPaths = np.zeros(N,dtype=np.float64) # number of (valid) shortest paths from to u or v, inexact above 2^53 but avoids overflow
     # initialize root nodes
     ancestor[u] = 1
     ancestor[v] = 2
@@ -272,7 +239,7 @@ def _Edge_Families_Full_numba(N,ind_ptr,indices,FCB_vals,e_idx,u,v):
     numPaths[v] = 1
 
     # output families
-    Fams = np.zeros((e_idx+1,4),dtype=np.int64)
+    Fams = np.zeros((e_idx+1,2),dtype=np.int64)
     nFams = 0
 
     # run BFS
@@ -290,13 +257,10 @@ def _Edge_Families_Full_numba(N,ind_ptr,indices,FCB_vals,e_idx,u,v):
                     u_paths += numPaths[par]
                 else:
                     v_paths += numPaths[par]
-            num_cycles = u_paths*v_paths
-            if num_cycles > 0: 
-                length = 2*distance[p] + 1
+            numPaths[p] = u_paths*v_paths
+            if numPaths[p] > 0: 
                 Fams[nFams,0] = -1
                 Fams[nFams,1] = p
-                Fams[nFams,2] = length
-                Fams[nFams,3] = num_cycles
                 nFams += 1
         
         for neigh_idx in range(ind_ptr[p],ind_ptr[p+1]):
@@ -331,11 +295,8 @@ def _Edge_Families_Full_numba(N,ind_ptr,indices,FCB_vals,e_idx,u,v):
                 num_cycles = numPaths[p] * numPaths[q]
                 if num_cycles>0 and e_idx>=FCB_vals[neigh_idx]:
                     # cycle is path p->u & q->v and edges (u,v) & (p,q)
-                    length = 2*distance[p]+2 
                     Fams[nFams,0] = p
                     Fams[nFams,1] = q
-                    Fams[nFams,2] = length
-                    Fams[nFams,3] = num_cycles
                     nFams += 1
 
         head = head+1
@@ -382,29 +343,31 @@ class RelCyc_Family:
     def arbitrary_cycle(self, rep='FCB'):
         """Extract an arbitrary cycle from a cycle family."""
         # initialize away from the root edge
+        parents = self.edge_DAG['parents']
         if self.parity == 1:
             x = self.x
-            u = next(u for u in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][u]==1) # arbitrary parent w/ u0 as ancestor
-            v = next(v for v in self.edge_DAG['parents'][x] if self.edge_DAG['ancestor'][v]==2)
+            u = next(u for u in parents[x] if self.edge_DAG['ancestor'][u]==1) # arbitrary parent w/ u0 as ancestor
+            v = next(v for v in parents[x] if self.edge_DAG['ancestor'][v]==2)
             left_nodes = [x,u]
             right_nodes = [v]
         else:
             u,v = self.e1
             left_nodes,right_nodes = [u],[v]
         # backtrack cycles to first parent
-        while u not in self.e0:
-            u = self.edge_DAG['parents'][u][0]
+        for _ in range(self.length//2-1):
+            u = parents[u][0]
             left_nodes.append(u)
-        while v not in self.e0:
-            v = self.edge_DAG['parents'][v][0]
+            v = parents[v][0]
             right_nodes.append(v)
         # merge both paths, move upwards through the right path
         left_nodes.extend(right_nodes[::-1])
         nodes = left_nodes
         # convert to desired format
-        if rep == 'nodes': 
+        if rep == 'index':
+            return nodes
+        elif rep == 'nodes': 
             return [self.node_labels[u] for u in nodes]
-        edges = {tuple(sorted([nodes[i], nodes[(i+1)%len(nodes)]])) for i in range(len(nodes))}
+        edges = {(nodes[i-1],nodes[i]) if nodes[i-1]<nodes[i] else (nodes[i],nodes[i-1]) for i in range(len(nodes))}
         if rep == 'edges':
             return {(self.node_labels[u],self.node_labels[v]) for u,v in edges}
         elif rep == 'FCB':
@@ -439,9 +402,11 @@ class RelCyc_Family:
         # merge both paths, move upwards through the right path
         left_nodes.extend(right_nodes[::-1])
         nodes = left_nodes
+        if rep == 'index':
+            return nodes
         if rep == 'nodes': 
             return [self.node_labels[u] for u in nodes]
-        edges = {tuple(sorted([nodes[i], nodes[(i+1)%len(nodes)]])) for i in range(len(nodes))}
+        edges = {tuple(sorted([nodes[i-1], u])) for i,u in enumerate(nodes)}
         if rep == 'edges':
             return {(self.node_labels[u],self.node_labels[v]) for u,v in edges}
         elif rep == 'FCB':
@@ -506,6 +471,8 @@ class RelCyc_Family:
             right_paths = [[u]+path for path in right_paths for u in self.edge_DAG['parents'][path[0]]]
         # build out cycles as path pairs
         cycles = [l_path+r_path for l_path in left_paths for r_path in right_paths]
+        if rep == 'index':
+            return cycles
         # use node labels
         cycles = [[self.node_labels[u] for u in C] for C in cycles]
         # only one representation currently allowed
@@ -557,7 +524,7 @@ class RelCyc_Family:
 # special case Vismara cycle family with one cycle
 class Ess_Family:
     """Description"""
-    def __init__(self, e0, length, num_cycles, x=None, e1=None, edge_DAG=None, FCB=None, node_labels=None, **kwargs):
+    def __init__(self, e0, length, x=None, e1=None, edge_DAG=None, FCB=None, node_labels=None, **kwargs):
         if x is not None: # odd family
             self.des=node_labels[x]
             u,v = edge_DAG['parents'][x] # parent ordering does not matter, may not correspond to u0,v0
@@ -568,43 +535,47 @@ class Ess_Family:
             u,v = e1
             left_nodes,right_nodes = [u],[v]
         else: raise ValueError
-        # backtrack cycles to first parent
-        while u not in e0:
+        # backtrack u and v to root
+        for _ in range(length//2-1):
             u = edge_DAG['parents'][u][0]
             left_nodes.append(u)
-        while v not in e0:
             v = edge_DAG['parents'][v][0]
             right_nodes.append(v)
         # merge both paths, move upwards through the right path
-        left_nodes.extend(right_nodes[::-1])
-        nodes = left_nodes
+        nodes = left_nodes+right_nodes[::-1]
+        self.index = nodes
         self.cycle = [node_labels[u] for u in nodes]
         # save FCB representation
-        edges = {tuple(sorted([nodes[i-1], nodes[i]])) for i in range(len(nodes))}
+        edges = {(nodes[i-1], nodes[i]) if nodes[i-1]<nodes[i] else (nodes[i],nodes[i-1]) for i in range(len(nodes))}
+        self.edgeset = {(node_labels[u],node_labels[v]) for u,v in edges}
         self.FCB_vec = [FCB.edge2idx[e] for e in edges if e in FCB.edge2idx]
         # save other values
         self.e0 = (node_labels[e0[0]],node_labels[e0[1]])
         self.length = length
-        self.num_cycles = num_cycles
+        self.num_cycles = 1.0
 
     def __repr__(self):
-        return f"RelCyc_Family(root={self.e0}, descriptor={self.des}, length={self.length}, num_cycles={self.num_cycles})"
+        return f"RelCyc_Family(root={self.e0}, descriptor={self.des}, length={self.length}, num_cycles={1.0})"
 
     def arbitrary_cycle(self, rep="FCB"):
-        if rep=='nodes':    return self.cycle
-        elif rep=='edges':  return {tuple(sorted([self.cycle[i-1], self.cycle[i]])) for i in range(len(self.cycle))}
+        if   rep=='nodes':  return self.cycle
+        elif rep=='index':  return self.index
+        elif rep=='edges':  return self.edgeset
         elif rep=='FCB':    return self.FCB_vec
 
     def random_cycle(self, rep='FCB'):
         return self.arbitrary_cycle(rep=rep)
     
     def nodes(self):
+        """Union of nodes belonging to cycles in the cycle family. Output as a set."""
         return set(self.cycle)
     
     def edges(self):
-        return {tuple(sorted([self.cycle[i-1], self.cycle[i]])) for i in range(len(self.cycle))}
+        """Union of edges belonging to the cycle family."""
+        return self.edgeset
     
     def all_cycles(self,rep='nodes'):
+        """List of all cycles from the cycle family."""
         return [self.arbitrary_cycle(rep=rep)]
     
     def contains(self,C,rep='nodes'):
@@ -617,7 +588,7 @@ class Ess_Family:
                 return self.cycle == C[idx::orientation]+C[:idx:orientation]
             except ValueError:
                 return False
-        elif rep=='edges':  raise NotImplementedError
+        elif rep=='edges':  return self.edges==C
         elif rep=='FCB':    return self.FCB_vec==C
         else:               raise ValueError
 

@@ -18,4 +18,4 @@ from .cycxchg import (
 )
 
 # sparseb.py is meant for backend purposes only
-# These functions can be accessed through cxc.sparseb
+# These functions can be accessed through cxc.spb

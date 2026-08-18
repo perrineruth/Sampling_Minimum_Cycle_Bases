@@ -704,7 +704,7 @@ class cycle_decomposition:
 
     @property
     def num_relevant_cycles(self):
-        """Number of relevant cycles."""
+        """Number of relevant cycles. May be inexact due to floating point errors for large sli classes."""
         return sum([pc.num_cycles for pc in self.pi_classes])
 
     def relevant_cycles(self,rep='nodes'):

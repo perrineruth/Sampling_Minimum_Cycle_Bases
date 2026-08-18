@@ -10,11 +10,11 @@ These codes are a part of the article "Theory and algorithms for clusters of cyc
 
 Included in this repository is a package `cycxchg` for computing cycles from a NetworkX graph. This can be installed from PyPI as follows:
 ```
-pip install cycxchg
-```
-We recommended installing this package in a new Python environment. Optionally, this package can be built with numba to greatly improve performance
-```
 pip install cycxchg[numba]
+```
+We recommended installing this package in a new Python environment. This package can be built without numba, but it will significantly reduce performance
+```
+pip install cycxchg
 ```
 
 Alternatively, the `cycxchg` package can be installed locally, so that the files can be modified.
